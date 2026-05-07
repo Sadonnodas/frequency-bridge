@@ -81,7 +81,11 @@ type Sink struct {
 	mu       sync.Mutex
 	nextID   int64
 	refToID  map[refKey]int64
+	idToRef  map[int64]refKey
 	statuses map[string]adapter.Status
+
+	adaptersMu sync.RWMutex
+	adapters   map[string]adapter.Adapter
 
 	dropped atomic.Uint64
 }
@@ -99,8 +103,45 @@ func New(store *state.Store, b *bus.Bus, logger *slog.Logger, buffer int) *Sink 
 		logger:   logger,
 		events:   make(chan adapter.Event, buffer),
 		refToID:  make(map[refKey]int64),
+		idToRef:  make(map[int64]refKey),
 		statuses: make(map[string]adapter.Status),
+		adapters: make(map[string]adapter.Adapter),
 	}
+}
+
+// RegisterAdapter teaches the Sink which adapter instance backs an adapter
+// id. WS RPC handlers use AdapterByID / ChannelInfo to dispatch writes to
+// the right Commander.
+func (s *Sink) RegisterAdapter(a adapter.Adapter) {
+	s.adaptersMu.Lock()
+	defer s.adaptersMu.Unlock()
+	s.adapters[a.Identity().InstanceID] = a
+}
+
+// AdapterByID returns the adapter registered for adapterID, or false if
+// none is known.
+func (s *Sink) AdapterByID(adapterID string) (adapter.Adapter, bool) {
+	s.adaptersMu.RLock()
+	defer s.adaptersMu.RUnlock()
+	a, ok := s.adapters[adapterID]
+	return a, ok
+}
+
+// ChannelInfo resolves a channel id to its (adapter, ref). Returns ok=false
+// when either the channel id is unknown or no adapter has been registered
+// for the owning adapter id.
+func (s *Sink) ChannelInfo(channelID int64) (adapter.Adapter, adapter.ChannelRef, bool) {
+	s.mu.Lock()
+	key, ok := s.idToRef[channelID]
+	s.mu.Unlock()
+	if !ok {
+		return nil, "", false
+	}
+	a, ok := s.AdapterByID(key.adapterID)
+	if !ok {
+		return nil, "", false
+	}
+	return a, key.ref, true
 }
 
 // Push implements adapter.EventSink. Drops the event (and bumps the dropped
@@ -188,6 +229,7 @@ func (s *Sink) handleChannelAdd(adapterID string, d adapter.ChannelDescriptor) {
 		s.nextID++
 		id = s.nextID
 		s.refToID[key] = id
+		s.idToRef[id] = key
 	}
 	s.mu.Unlock()
 
@@ -201,6 +243,7 @@ func (s *Sink) handleChannelDrop(adapterID string, ref adapter.ChannelRef) {
 	id, ok := s.refToID[key]
 	if ok {
 		delete(s.refToID, key)
+		delete(s.idToRef, id)
 	}
 	s.mu.Unlock()
 

@@ -56,6 +56,7 @@ type Config struct {
 type Adapter struct {
 	cfg    Config
 	logger *slog.Logger
+	client *Client
 
 	mu       sync.RWMutex
 	status   adapter.Status
@@ -71,7 +72,7 @@ func New(cfg Config, logger *slog.Logger) *Adapter {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Adapter{cfg: cfg, logger: logger}
+	return &Adapter{cfg: cfg, logger: logger, client: newClient(cfg)}
 }
 
 func (a *Adapter) Identity() adapter.Identity {
@@ -151,7 +152,7 @@ func (a *Adapter) pushDisconnect(sink adapter.EventSink, errMsg string) {
 // we got far enough to register the SSE subscription (used to decide if
 // backoff resets). Returns nil err only on context cancellation.
 func (a *Adapter) connectAndStream(ctx context.Context, sink adapter.EventSink) (didConnect bool, err error) {
-	client := newClient(a.cfg)
+	client := a.client
 
 	// 1. Open the SSE subscription first so we can capture the sessionUUID
 	//    from the spec'd "open" event before doing any further requests.
@@ -296,25 +297,95 @@ func (a *Adapter) handleResourceUpdate(path string, raw json.RawMessage, sink ad
 	})
 }
 
-// Commander methods (stubs for slice 1 — read-only path).
+// Commander methods --------------------------------------------------------
+//
+// These translate the generic Commander API into PUT requests against
+// /api/audio/inputs/{id}. The per-device write lock (internal/safety) is
+// enforced ONE LEVEL UP in the WS RPC handler, NOT here, so an adapter call
+// always represents an authorized write.
 
-func (a *Adapter) SetChannelName(_ context.Context, _ adapter.ChannelRef, _ string) error {
-	return adapter.ErrUnsupported
+const (
+	freqMinMHz = 470
+	freqMaxMHz = 700
+	gainMinDB  = 0
+	gainMaxDB  = 60
+)
+
+func (a *Adapter) SetChannelName(ctx context.Context, ref adapter.ChannelRef, name string) error {
+	id, err := parseInputRef(ref)
+	if err != nil {
+		return err
+	}
+	return mapClientErr(a.client.PutInput(ctx, id, map[string]any{"name": name}))
 }
-func (a *Adapter) SetFrequency(_ context.Context, _ adapter.ChannelRef, _ float64) error {
-	return adapter.ErrUnsupported
+
+func (a *Adapter) SetFrequency(ctx context.Context, ref adapter.ChannelRef, mhz float64) error {
+	id, err := parseInputRef(ref)
+	if err != nil {
+		return err
+	}
+	if mhz < freqMinMHz || mhz > freqMaxMHz {
+		return fmt.Errorf("%w: frequency %.3f MHz outside [%d, %d]",
+			adapter.ErrInvalidArg, mhz, freqMinMHz, freqMaxMHz)
+	}
+	khz := int(mhz*1000 + 0.5) // round to nearest kHz
+	return mapClientErr(a.client.PutInput(ctx, id, map[string]any{"frequency": khz}))
 }
-func (a *Adapter) SetGain(_ context.Context, _ adapter.ChannelRef, _ float64) error {
-	return adapter.ErrUnsupported
+
+func (a *Adapter) SetGain(ctx context.Context, ref adapter.ChannelRef, db float64) error {
+	id, err := parseInputRef(ref)
+	if err != nil {
+		return err
+	}
+	if db < gainMinDB || db > gainMaxDB {
+		return fmt.Errorf("%w: gain %.1f dB outside [%d, %d]",
+			adapter.ErrInvalidArg, db, gainMinDB, gainMaxDB)
+	}
+	return mapClientErr(a.client.PutInput(ctx, id, map[string]any{"gain_db": int(db)}))
 }
-func (a *Adapter) SetMute(_ context.Context, _ adapter.ChannelRef, _ bool) error {
-	return adapter.ErrUnsupported
+
+func (a *Adapter) SetMute(ctx context.Context, ref adapter.ChannelRef, muted bool) error {
+	id, err := parseInputRef(ref)
+	if err != nil {
+		return err
+	}
+	return mapClientErr(a.client.PutInput(ctx, id, map[string]any{"mute": muted}))
 }
-func (a *Adapter) SetEncryption(_ context.Context, _ adapter.ChannelRef, _ bool) error {
-	return adapter.ErrUnsupported
+
+func (a *Adapter) SetEncryption(ctx context.Context, ref adapter.ChannelRef, enabled bool) error {
+	id, err := parseInputRef(ref)
+	if err != nil {
+		return err
+	}
+	return mapClientErr(a.client.PutInput(ctx, id, map[string]any{"encrypted": enabled}))
 }
+
 func (a *Adapter) Invoke(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
 	return nil, adapter.ErrUnsupported
+}
+
+// parseInputRef extracts the integer id from a "input:N" channel ref.
+func parseInputRef(ref adapter.ChannelRef) (int, error) {
+	s := string(ref)
+	if !strings.HasPrefix(s, "input:") {
+		return 0, adapter.ErrChannelGone
+	}
+	id, err := strconv.Atoi(s[len("input:"):])
+	if err != nil {
+		return 0, adapter.ErrChannelGone
+	}
+	return id, nil
+}
+
+// mapClientErr translates client errors into adapter sentinels where it can.
+func mapClientErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errInputNotFound) {
+		return adapter.ErrChannelGone
+	}
+	return err
 }
 
 // Helpers ------------------------------------------------------------------

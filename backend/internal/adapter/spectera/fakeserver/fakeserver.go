@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/audio/inputs", s.requireAuth(s.handleListInputs))
 	s.mux.HandleFunc("GET /api/audio/inputs/{id}", s.requireAuth(s.handleGetInput))
+	s.mux.HandleFunc("PUT /api/audio/inputs/{id}", s.requireAuth(s.handlePutInput))
 	s.mux.HandleFunc("GET /api/ssc/state/subscriptions", s.requireAuth(s.handleSubscribe))
 	s.mux.HandleFunc("PUT /api/ssc/state/subscriptions/{id}", s.requireAuth(s.handleSetSubscription))
 	s.mux.HandleFunc("PUT /api/ssc/state/subscriptions/{id}/add", s.requireAuth(s.handleAddSubscription))
@@ -231,6 +232,54 @@ func (s *Server) handleGetInput(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(in)
+}
+
+// handlePutInput accepts a partial-update JSON body and applies any of
+// {name, frequency, mute, gain_db, encrypted}. Unknown fields are ignored.
+// Successful updates push the resource as an SSE event to subscribed
+// clients.
+func (s *Server) handlePutInput(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	var patch struct {
+		Name      *string `json:"name"`
+		Frequency *int    `json:"frequency"`
+		Mute      *bool   `json:"mute"`
+		GainDB    *int    `json:"gain_db"`
+		Encrypted *bool   `json:"encrypted"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	in, ok := s.inputs[id]
+	if !ok {
+		s.mu.Unlock()
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if patch.Name != nil {
+		in.Name = *patch.Name
+	}
+	if patch.Frequency != nil {
+		in.Frequency = *patch.Frequency
+	}
+	if patch.Mute != nil {
+		in.Mute = *patch.Mute
+	}
+	if patch.GainDB != nil {
+		in.GainDB = *patch.GainDB
+	}
+	if patch.Encrypted != nil {
+		in.Encrypted = *patch.Encrypted
+	}
+	s.mu.Unlock()
+	s.notifyResource(inputPath(id))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {

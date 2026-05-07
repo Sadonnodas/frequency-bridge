@@ -14,8 +14,10 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/Sadonnodas/frequency-bridge/internal/adapter"
 	"github.com/Sadonnodas/frequency-bridge/internal/bus"
 	"github.com/Sadonnodas/frequency-bridge/internal/events"
+	"github.com/Sadonnodas/frequency-bridge/internal/safety"
 	"github.com/Sadonnodas/frequency-bridge/internal/state"
 )
 
@@ -31,14 +33,18 @@ type Server struct {
 	bus    *bus.Bus
 	store  *state.Store
 	sink   *events.Sink
+	locks  *safety.Locks
 	logger *slog.Logger
 }
 
-func NewServer(b *bus.Bus, store *state.Store, sink *events.Sink, logger *slog.Logger) *Server {
+func NewServer(b *bus.Bus, store *state.Store, sink *events.Sink, locks *safety.Locks, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{bus: b, store: store, sink: sink, logger: logger}
+	if locks == nil {
+		locks = safety.New()
+	}
+	return &Server{bus: b, store: store, sink: sink, locks: locks, logger: logger}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -223,14 +229,237 @@ func (cn *conn) handleUnsubscribe(m clientMsg) {
 	cn.s.bus.SetPatterns(cn.sub, all)
 }
 
-func (cn *conn) handleRPC(_ context.Context, m clientMsg) {
-	// Phase 1: RPC isn't required by the end-of-phase test. Reply with a
-	// structured "unsupported" error so the client can detect lack of support.
-	cn.send(rpcResultMsg{
-		Type: "rpc.result", ID: m.ID, OK: false,
-		Error: &rpcError{Code: "unsupported", Message: "rpc method not implemented in Phase 1: " + m.Method},
-	})
+func (cn *conn) handleRPC(ctx context.Context, m clientMsg) {
+	handler, ok := rpcHandlers[m.Method]
+	if !ok {
+		cn.send(rpcResultMsg{
+			Type: "rpc.result", ID: m.ID, OK: false,
+			Error: &rpcError{Code: "unsupported", Message: "unknown rpc method: " + m.Method},
+		})
+		return
+	}
+	res, err := handler(cn, ctx, m.Params)
+	if err != nil {
+		code, msg := classifyRPCErr(err)
+		cn.send(rpcResultMsg{
+			Type: "rpc.result", ID: m.ID, OK: false,
+			Error: &rpcError{Code: code, Message: msg},
+		})
+		return
+	}
+	cn.send(rpcResultMsg{Type: "rpc.result", ID: m.ID, OK: true, Result: res})
 }
+
+// rpcCoded wraps an inner error with an explicit RPC error code, used when
+// the standard adapter sentinels don't capture the failure mode (e.g.
+// safety locks, missing channel id).
+type rpcCoded struct {
+	code string
+	err  error
+}
+
+func (e *rpcCoded) Error() string { return e.err.Error() }
+func (e *rpcCoded) Unwrap() error { return e.err }
+
+func classifyRPCErr(err error) (code, msg string) {
+	var coded *rpcCoded
+	if errors.As(err, &coded) {
+		return coded.code, coded.err.Error()
+	}
+	switch {
+	case errors.Is(err, adapter.ErrUnsupported):
+		return "unsupported", err.Error()
+	case errors.Is(err, adapter.ErrInvalidArg):
+		return "invalid_argument", err.Error()
+	case errors.Is(err, adapter.ErrChannelGone):
+		return "not_found", err.Error()
+	case errors.Is(err, adapter.ErrDeviceOffline):
+		return "device_offline", err.Error()
+	case errors.Is(err, adapter.ErrAuthRequired):
+		return "auth_required", err.Error()
+	case errors.Is(err, adapter.ErrTimeout):
+		return "timeout", err.Error()
+	}
+	return "internal", err.Error()
+}
+
+// rpcHandler signature: takes the connection, a context (kept ctx-aware for
+// adapter calls), and the raw params. Returns either a result struct or an
+// error which classifyRPCErr translates to a wire code.
+type rpcHandler func(*conn, context.Context, json.RawMessage) (any, error)
+
+var rpcHandlers = map[string]rpcHandler{
+	"channel.set_frequency":    (*conn).rpcChannelSetFrequency,
+	"channel.set_mute":         (*conn).rpcChannelSetMute,
+	"channel.set_encryption":   (*conn).rpcChannelSetEncryption,
+	"channel.set_name":         (*conn).rpcChannelSetName,
+	"channel.set_gain":         (*conn).rpcChannelSetGain,
+	"device.list":              (*conn).rpcDeviceList,
+	"device.set_write_enabled": (*conn).rpcDeviceSetWriteEnabled,
+	"app.get_mode":             (*conn).rpcAppGetMode,
+	"app.set_mode":             (*conn).rpcAppSetMode,
+}
+
+// channelSet centralises the boilerplate of: parse channel_id, look up
+// adapter, check safety lock, then call a Commander method.
+func (cn *conn) channelSet(ctx context.Context, channelID int64, op func(context.Context, adapter.Adapter, adapter.ChannelRef) error) error {
+	a, ref, ok := cn.s.sink.ChannelInfo(channelID)
+	if !ok {
+		return &rpcCoded{code: "not_found", err: fmt.Errorf("unknown channel_id %d", channelID)}
+	}
+	if err := cn.s.locks.AllowWrite(a.Identity().InstanceID); err != nil {
+		return &rpcCoded{code: "read_only", err: err}
+	}
+	return op(ctx, a, ref)
+}
+
+func (cn *conn) rpcChannelSetFrequency(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		ChannelID int64   `json:"channel_id"`
+		MHz       float64 `json:"mhz"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	if err := cn.channelSet(ctx, p.ChannelID, func(ctx context.Context, a adapter.Adapter, ref adapter.ChannelRef) error {
+		return a.SetFrequency(ctx, ref, p.MHz)
+	}); err != nil {
+		return nil, err
+	}
+	return rpcOK(), nil
+}
+
+func (cn *conn) rpcChannelSetMute(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		ChannelID int64 `json:"channel_id"`
+		Muted     bool  `json:"muted"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	if err := cn.channelSet(ctx, p.ChannelID, func(ctx context.Context, a adapter.Adapter, ref adapter.ChannelRef) error {
+		return a.SetMute(ctx, ref, p.Muted)
+	}); err != nil {
+		return nil, err
+	}
+	return rpcOK(), nil
+}
+
+func (cn *conn) rpcChannelSetEncryption(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		ChannelID int64 `json:"channel_id"`
+		Enabled   bool  `json:"enabled"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	if err := cn.channelSet(ctx, p.ChannelID, func(ctx context.Context, a adapter.Adapter, ref adapter.ChannelRef) error {
+		return a.SetEncryption(ctx, ref, p.Enabled)
+	}); err != nil {
+		return nil, err
+	}
+	return rpcOK(), nil
+}
+
+func (cn *conn) rpcChannelSetName(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		ChannelID int64  `json:"channel_id"`
+		Name      string `json:"name"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	if p.Name == "" {
+		return nil, &rpcCoded{code: "invalid_argument", err: errors.New("name must be non-empty")}
+	}
+	if err := cn.channelSet(ctx, p.ChannelID, func(ctx context.Context, a adapter.Adapter, ref adapter.ChannelRef) error {
+		return a.SetChannelName(ctx, ref, p.Name)
+	}); err != nil {
+		return nil, err
+	}
+	return rpcOK(), nil
+}
+
+func (cn *conn) rpcChannelSetGain(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		ChannelID int64   `json:"channel_id"`
+		DB        float64 `json:"db"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	if err := cn.channelSet(ctx, p.ChannelID, func(ctx context.Context, a adapter.Adapter, ref adapter.ChannelRef) error {
+		return a.SetGain(ctx, ref, p.DB)
+	}); err != nil {
+		return nil, err
+	}
+	return rpcOK(), nil
+}
+
+func (cn *conn) rpcDeviceList(_ context.Context, _ json.RawMessage) (any, error) {
+	statuses := cn.s.sink.Statuses()
+	locks := cn.s.locks.Snapshot()
+	return map[string]any{
+		"statuses":      statuses,
+		"write_enabled": locks.WriteEnabled,
+		"show_mode":     locks.ShowMode,
+	}, nil
+}
+
+func (cn *conn) rpcDeviceSetWriteEnabled(_ context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		DeviceID string `json:"device_id"`
+		Enabled  bool   `json:"enabled"`
+		Confirm  bool   `json:"confirm"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	if p.DeviceID == "" {
+		return nil, &rpcCoded{code: "invalid_argument", err: errors.New("device_id required")}
+	}
+	// Per handoff section 11: enabling writes requires explicit confirm.
+	// Disabling does not (the safe direction is friction-free).
+	if p.Enabled && !p.Confirm {
+		return nil, &rpcCoded{code: "invalid_argument", err: errors.New("confirm:true required to enable writes")}
+	}
+	cn.s.locks.SetWriteEnabled(p.DeviceID, p.Enabled)
+	return map[string]any{"device_id": p.DeviceID, "enabled": p.Enabled}, nil
+}
+
+func (cn *conn) rpcAppGetMode(_ context.Context, _ json.RawMessage) (any, error) {
+	mode := "normal"
+	if cn.s.locks.IsShowMode() {
+		mode = "show_mode"
+	}
+	return map[string]any{"mode": mode}, nil
+}
+
+func (cn *conn) rpcAppSetMode(_ context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		Mode    string `json:"mode"`
+		Confirm bool   `json:"confirm"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcCoded{code: "invalid_argument", err: err}
+	}
+	switch p.Mode {
+	case "normal":
+		// Leaving show mode requires confirm — the unsafe direction.
+		if cn.s.locks.IsShowMode() && !p.Confirm {
+			return nil, &rpcCoded{code: "invalid_argument", err: errors.New("confirm:true required to leave show_mode")}
+		}
+		cn.s.locks.SetShowMode(false)
+	case "show_mode":
+		// Entering show mode is one click — the safe direction.
+		cn.s.locks.SetShowMode(true)
+	default:
+		return nil, &rpcCoded{code: "invalid_argument", err: fmt.Errorf("unknown mode %q (want normal | show_mode)", p.Mode)}
+	}
+	return map[string]any{"mode": p.Mode}, nil
+}
+
+func rpcOK() map[string]any { return map[string]any{"ok": true} }
 
 func (cn *conn) send(payload any) {
 	select {

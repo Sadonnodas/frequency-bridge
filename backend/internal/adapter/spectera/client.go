@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,6 +70,41 @@ func (c *Client) ListInputs(ctx context.Context) ([]Input, error) {
 	}
 	return out, nil
 }
+
+// PutInput PUTs a partial-update body to /api/audio/inputs/{id}. fields is a
+// JSON object containing only the keys to change (e.g. {"frequency":580125}
+// or {"mute":true}). The server applies the patch atomically and emits an
+// SSE notification for the resource.
+func (c *Client) PutInput(ctx context.Context, id int, fields map[string]any) error {
+	body, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := c.newRequest(reqCtx, http.MethodPut, fmt.Sprintf("/api/audio/inputs/%d", id), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("put input %d: %w", id, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return errInputNotFound
+	}
+	if resp.StatusCode == http.StatusBadRequest {
+		return fmt.Errorf("put input %d: %s", id, resp.Status)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("put input %d: %s", id, resp.Status)
+	}
+	return nil
+}
+
+var errInputNotFound = errors.New("input not found")
 
 // SetSubscriptionPaths PUTs the full set of paths for a subscription. Per
 // SSCv2 spec, the server responds with the initial values of any newly-added

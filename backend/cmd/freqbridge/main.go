@@ -23,6 +23,7 @@ import (
 	"github.com/Sadonnodas/frequency-bridge/internal/bus"
 	"github.com/Sadonnodas/frequency-bridge/internal/db"
 	"github.com/Sadonnodas/frequency-bridge/internal/events"
+	"github.com/Sadonnodas/frequency-bridge/internal/safety"
 	"github.com/Sadonnodas/frequency-bridge/internal/state"
 )
 
@@ -55,13 +56,19 @@ func main() {
 	store := state.NewStore()
 	b := bus.New()
 	sink := events.New(store, b, logger, 1024)
-	wsServer := ws.NewServer(b, store, sink, logger)
+	locks := safety.New()
+	wsServer := ws.NewServer(b, store, sink, locks, logger)
 
 	adapters := []adapter.Adapter{
 		mock.New("mock:0", "Mock Receiver", 4),
 	}
 	for _, sp := range loadSpecteraConfigs(logger) {
 		adapters = append(adapters, spectera.New(sp, logger))
+	}
+	// Register adapters with the sink so WS RPC handlers can dispatch
+	// channel.set_* writes to the right Commander.
+	for _, a := range adapters {
+		sink.RegisterAdapter(a)
 	}
 
 	srv := api.NewServer(api.Config{Bind: bind, WSHandler: wsServer.Handler()})
