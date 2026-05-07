@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Sadonnodas/frequency-bridge/internal/adapter"
 	"github.com/Sadonnodas/frequency-bridge/internal/adapter/mock"
+	"github.com/Sadonnodas/frequency-bridge/internal/adapter/spectera"
 	"github.com/Sadonnodas/frequency-bridge/internal/api"
 	"github.com/Sadonnodas/frequency-bridge/internal/api/ws"
 	"github.com/Sadonnodas/frequency-bridge/internal/bus"
@@ -55,8 +57,12 @@ func main() {
 	sink := events.New(store, b, logger, 1024)
 	wsServer := ws.NewServer(b, store, sink, logger)
 
-	mockAdapter := mock.New("mock:0", "Mock Receiver", 4)
-	adapters := []adapter.Adapter{mockAdapter}
+	adapters := []adapter.Adapter{
+		mock.New("mock:0", "Mock Receiver", 4),
+	}
+	for _, sp := range loadSpecteraConfigs(logger) {
+		adapters = append(adapters, spectera.New(sp, logger))
+	}
 
 	srv := api.NewServer(api.Config{Bind: bind, WSHandler: wsServer.Handler()})
 
@@ -118,4 +124,56 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("shutdown complete")
+}
+
+// loadSpecteraConfigs reads FREQBRIDGE_SPECTERA (comma-separated base URLs)
+// and the related credential / TLS env vars, returning one Config per host.
+//
+//	FREQBRIDGE_SPECTERA               comma-separated full base URLs
+//	                                  e.g. "https://192.168.6.50,http://127.0.0.1:8443"
+//	FREQBRIDGE_SPECTERA_USER          basic-auth username (default "api")
+//	FREQBRIDGE_SPECTERA_PASSWORD      basic-auth password (required if hosts set)
+//	FREQBRIDGE_SPECTERA_INSECURE_TLS  "1" / "true" to accept self-signed certs
+//
+// If FREQBRIDGE_SPECTERA is empty, no Spectera adapters are configured.
+func loadSpecteraConfigs(logger *slog.Logger) []spectera.Config {
+	raw := strings.TrimSpace(os.Getenv("FREQBRIDGE_SPECTERA"))
+	if raw == "" {
+		return nil
+	}
+	password := os.Getenv("FREQBRIDGE_SPECTERA_PASSWORD")
+	if password == "" {
+		logger.Warn("FREQBRIDGE_SPECTERA set but FREQBRIDGE_SPECTERA_PASSWORD is empty; ignoring",
+			"hosts", raw)
+		return nil
+	}
+	user := os.Getenv("FREQBRIDGE_SPECTERA_USER")
+	if user == "" {
+		user = "api"
+	}
+	insecure := envTruthy("FREQBRIDGE_SPECTERA_INSECURE_TLS")
+
+	var out []spectera.Config
+	for _, h := range strings.Split(raw, ",") {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		host := strings.TrimPrefix(strings.TrimPrefix(h, "https://"), "http://")
+		host = strings.TrimSuffix(host, "/")
+		out = append(out, spectera.Config{
+			InstanceID:         "spectera:" + host,
+			DisplayName:        "Spectera (" + host + ")",
+			BaseURL:            h,
+			Username:           user,
+			Password:           password,
+			InsecureSkipVerify: insecure,
+		})
+	}
+	return out
+}
+
+func envTruthy(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }

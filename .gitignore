@@ -42,3 +42,4 @@ backend/internal/web/dist/*
 
 # Local-only spec / handoff (kept out of the public repo)
 frequency-bridge-handoff.md
+api-docs_3rd_party_api_*.pdf
