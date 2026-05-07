@@ -1,4 +1,11 @@
 import { writable } from 'svelte/store';
+import { deliverRPCResult, failPendingOnDisconnect, rpc, RPCError } from '../api';
+import {
+	applyDeviceStatus,
+	loadFromDeviceList,
+	type DeviceListPayload,
+	type DeviceStatus
+} from './devices';
 import {
 	applyPatch,
 	channels,
@@ -52,6 +59,14 @@ function open() {
 		send({ type: 'subscribe', subscription_id: 'lifecycle', topic: 'channel.lifecycle' });
 		send({ type: 'subscribe', subscription_id: 'state', topic: 'channel.state.*' });
 		send({ type: 'subscribe', subscription_id: 'devices', topic: 'device.status' });
+
+		// Pull lock + show-mode state. The WS subscribe to device.status only
+		// gives us live updates, not the snapshot; device.list does both.
+		rpc<DeviceListPayload>('device.list')
+			.then((p) => loadFromDeviceList(p))
+			.catch((err: RPCError) => {
+				console.error('device.list failed', err);
+			});
 	};
 
 	ws.onmessage = (ev) => {
@@ -71,6 +86,7 @@ function open() {
 		connectionStatus.set('closed');
 		ws = null;
 		markAllStale(true);
+		failPendingOnDisconnect();
 		scheduleReconnect();
 	};
 }
@@ -120,7 +136,10 @@ function handle(msg: WSMessage) {
 			);
 			break;
 		case 'device.status':
-			// Phase 1: we don't render device status separately yet.
+			applyDeviceStatus(msg.device_id as string, msg.status as DeviceStatus);
+			break;
+		case 'rpc.result':
+			deliverRPCResult(msg as Parameters<typeof deliverRPCResult>[0]);
 			break;
 		case 'alert.fired':
 			// Phase 1: alert handling lives in Phase 5+.

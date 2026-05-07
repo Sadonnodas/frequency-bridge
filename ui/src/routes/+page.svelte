@@ -2,7 +2,9 @@
 	import { onMount } from 'svelte';
 	import { connect, connectionStatus } from '$lib/stores/ws';
 	import { channels } from '$lib/stores/channels';
+	import { showMode } from '$lib/stores/devices';
 	import ChannelCard from '$lib/components/ChannelCard.svelte';
+	import ShowModeBadge from '$lib/components/ShowModeBadge.svelte';
 
 	onMount(() => {
 		connect();
@@ -17,15 +19,18 @@
 	};
 </script>
 
-<div class="mx-auto max-w-5xl p-6">
+<div class="mx-auto max-w-5xl p-6" class:bg-red-50={$showMode}>
 	<header class="mb-6 flex items-center justify-between">
 		<div>
 			<h1 class="text-2xl font-semibold text-gray-900">Frequency Bridge</h1>
-			<p class="text-sm text-gray-500">Phase 1 — mock adapter end-to-end</p>
+			<p class="text-sm text-gray-500">Phase 2 slice 2 — Commander writes through WS RPC</p>
 		</div>
-		<div class="flex items-center gap-2 text-sm text-gray-600">
-			<span class="inline-block h-2.5 w-2.5 rounded-full {statusColor[$connectionStatus]}"></span>
-			{$connectionStatus}
+		<div class="flex items-center gap-3">
+			<ShowModeBadge />
+			<div class="flex items-center gap-2 text-sm text-gray-600">
+				<span class="inline-block h-2.5 w-2.5 rounded-full {statusColor[$connectionStatus]}"></span>
+				{$connectionStatus}
+			</div>
 		</div>
 	</header>
 
