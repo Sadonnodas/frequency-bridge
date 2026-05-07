@@ -1,8 +1,8 @@
 import { writable } from 'svelte/store';
 import {
 	applyPatch,
+	channels,
 	clearChannels,
-	markChannelStale,
 	removeChannel,
 	setChannel,
 	type ChannelDTO
@@ -70,26 +70,19 @@ function open() {
 	ws.onclose = () => {
 		connectionStatus.set('closed');
 		ws = null;
-		// Mark every known channel stale so the UI can show grey-out.
-		clearStale(true);
+		markAllStale(true);
 		scheduleReconnect();
 	};
 }
 
-function clearStale(stale: boolean) {
-	// Iterate channels via the store update; we don't keep a separate cache here.
-	// markChannelStale loops in the store update.
-	// For simplicity just call channels.update with a transformer.
-	import('./channels').then((mod) => {
-		mod.channels.update((m) => {
-			const next = new Map(m);
-			for (const [id, c] of next) {
-				next.set(id, { ...c, snapshot: { ...c.snapshot, stale } });
-			}
-			return next;
-		});
+function markAllStale(stale: boolean) {
+	channels.update((m) => {
+		const next = new Map(m);
+		for (const [id, c] of next) {
+			next.set(id, { ...c, snapshot: { ...c.snapshot, stale } });
+		}
+		return next;
 	});
-	void markChannelStale; // keep import live for tree-shake stability
 }
 
 function scheduleReconnect() {

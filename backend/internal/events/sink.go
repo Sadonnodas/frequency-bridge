@@ -236,18 +236,20 @@ func (s *Sink) handleStatePatch(adapterID string, ts time.Time, p *adapter.State
 
 func (s *Sink) handleConnection(adapterID string, ts time.Time, c adapter.ConnectionEvent) {
 	s.mu.Lock()
-	st, ok := s.statuses[adapterID]
-	if !ok {
+	st, exists := s.statuses[adapterID]
+	if !exists {
 		st = adapter.Status{}
 	}
-	if c.Connected && !st.Connected {
+	if c.Connected {
+		// Bump ReconnectCount only when transitioning back UP from a known
+		// disconnected state — not on the very first connect of an adapter.
+		if exists && !st.Connected {
+			st.ReconnectCount++
+		}
 		if ts.IsZero() {
 			ts = time.Now()
 		}
 		st.Since = ts
-	}
-	if !c.Connected && st.Connected {
-		st.ReconnectCount++
 	}
 	st.Connected = c.Connected
 	st.LastError = c.Error

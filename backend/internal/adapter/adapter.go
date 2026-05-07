@@ -31,18 +31,18 @@ type Adapter interface {
 }
 
 type Identity struct {
-	InstanceID  string // e.g. "spectera:192.168.1.50" or "mock:1"
-	Vendor      string // "sennheiser-spectera" | "shure-axient" | "sennheiser-d6000" | "mock"
-	Model       string
-	DisplayName string
-	Host        string
+	InstanceID  string `json:"instance_id"` // e.g. "spectera:192.168.1.50" or "mock:1"
+	Vendor      string `json:"vendor"`      // "sennheiser-spectera" | "shure-axient" | "sennheiser-d6000" | "mock"
+	Model       string `json:"model"`
+	DisplayName string `json:"display_name"`
+	Host        string `json:"host"`
 }
 
 type Status struct {
-	Connected      bool
-	Since          time.Time
-	LastError      string
-	ReconnectCount int
+	Connected      bool      `json:"connected"`
+	Since          time.Time `json:"since"`
+	LastError      string    `json:"last_error,omitempty"`
+	ReconnectCount int       `json:"reconnect_count"`
 }
 
 type Commander interface {
@@ -56,27 +56,27 @@ type Commander interface {
 type ChannelRef string
 
 type ChannelDescriptor struct {
-	Ref                ChannelRef
-	Vendor             string
-	NaturalUnit        string // "channel" | "link" | "pack"
-	Direction          string // "tx" | "rx" | "bidirectional"
-	Name               string
-	DefaultDisplayName string
-	Capabilities       Capabilities
-	Model              string
-	Group              string
-	SlotIndex          int
+	Ref                ChannelRef   `json:"ref"`
+	Vendor             string       `json:"vendor"`
+	NaturalUnit        string       `json:"natural_unit"` // "channel" | "link" | "pack"
+	Direction          string       `json:"direction"`    // "tx" | "rx" | "bidirectional"
+	Name               string       `json:"name"`
+	DefaultDisplayName string       `json:"default_display_name,omitempty"`
+	Capabilities       Capabilities `json:"capabilities"`
+	Model              string       `json:"model,omitempty"`
+	Group              string       `json:"group,omitempty"`
+	SlotIndex          int          `json:"slot_index,omitempty"`
 }
 
 type Capabilities struct {
-	SupportsMute       bool
-	SupportsEncryption bool
-	SupportsGainAdjust bool
-	SupportsFreqAdjust bool
-	SupportsScan       bool
-	GainRangeDB        [2]float64
-	FreqRangeMHz       [2]float64
-	VendorOps          []string
+	SupportsMute       bool       `json:"supports_mute"`
+	SupportsEncryption bool       `json:"supports_encryption"`
+	SupportsGainAdjust bool       `json:"supports_gain_adjust"`
+	SupportsFreqAdjust bool       `json:"supports_freq_adjust"`
+	SupportsScan       bool       `json:"supports_scan"`
+	GainRangeDB        [2]float64 `json:"gain_range_db"`
+	FreqRangeMHz       [2]float64 `json:"freq_range_mhz"`
+	VendorOps          []string   `json:"vendor_ops,omitempty"`
 }
 
 type EventSink interface {

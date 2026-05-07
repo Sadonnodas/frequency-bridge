@@ -50,14 +50,14 @@ export type ChannelSnapshot = {
 };
 
 export type Capabilities = {
-	SupportsMute: boolean;
-	SupportsEncryption: boolean;
-	SupportsGainAdjust: boolean;
-	SupportsFreqAdjust: boolean;
-	SupportsScan: boolean;
-	GainRangeDB: [number, number];
-	FreqRangeMHz: [number, number];
-	VendorOps?: string[];
+	supports_mute: boolean;
+	supports_encryption: boolean;
+	supports_gain_adjust: boolean;
+	supports_freq_adjust: boolean;
+	supports_scan: boolean;
+	gain_range_db: [number, number];
+	freq_range_mhz: [number, number];
+	vendor_ops?: string[];
 };
 
 export type ChannelDTO = {
