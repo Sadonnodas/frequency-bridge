@@ -1,7 +1,4 @@
 // Package api wires HTTP and WebSocket routes for the Frequency Bridge backend.
-//
-// Phase 0 only provides the routing skeleton; WebSocket fan-out, RPC handling,
-// and the embedded UI come online in later phases.
 package api
 
 import (
@@ -12,7 +9,8 @@ import (
 )
 
 type Config struct {
-	Bind string
+	Bind      string
+	WSHandler http.Handler
 }
 
 type Server struct {
@@ -30,7 +28,11 @@ func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
-	s.mux.HandleFunc("GET /ws", s.handleWebSocket)
+	if s.cfg.WSHandler != nil {
+		s.mux.Handle("GET /ws", s.cfg.WSHandler)
+	} else {
+		s.mux.HandleFunc("GET /ws", s.wsNotConfigured)
+	}
 	s.mux.Handle("/", web.Handler())
 }
 
@@ -39,6 +41,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "websocket endpoint not yet implemented", http.StatusNotImplemented)
+func (s *Server) wsNotConfigured(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "websocket endpoint not configured", http.StatusNotImplemented)
 }
